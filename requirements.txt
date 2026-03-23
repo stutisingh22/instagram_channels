@@ -1,0 +1,7 @@
+pandas>=2.2.0
+python-dotenv>=1.0.0
+instaloader>=4.14.1
+requests>=2.32.0
+beautifulsoup4>=4.12.0
+browser-cookie3>=0.19.1
+playwright>=1.54.0

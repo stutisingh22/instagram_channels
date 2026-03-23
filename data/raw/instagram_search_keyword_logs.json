@@ -1,0 +1,47 @@
+[
+  {
+    "keyword": "us news",
+    "usernames_found": 5,
+    "error": null
+  },
+  {
+    "keyword": "american news",
+    "usernames_found": 5,
+    "error": null
+  },
+  {
+    "keyword": "us politics",
+    "usernames_found": 5,
+    "error": null
+  },
+  {
+    "keyword": "washington news",
+    "usernames_found": 5,
+    "error": null
+  },
+  {
+    "keyword": "us entertainment news",
+    "usernames_found": 4,
+    "error": null
+  },
+  {
+    "keyword": "hollywood news",
+    "usernames_found": 5,
+    "error": null
+  },
+  {
+    "keyword": "us business news",
+    "usernames_found": 5,
+    "error": null
+  },
+  {
+    "keyword": "new york news",
+    "usernames_found": 5,
+    "error": null
+  },
+  {
+    "keyword": "los angeles news",
+    "usernames_found": 5,
+    "error": null
+  }
+]
