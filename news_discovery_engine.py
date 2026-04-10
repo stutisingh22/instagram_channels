@@ -197,6 +197,117 @@ def collect_profiles_via_dom_search(
     return out
 
 
+# Regexes for parsing Instagram profile page meta tags during fast enrichment.
+_META_DESC_RE = re.compile(
+    r'<meta\s+(?:property|name)="description"\s+content="([^"]+)"',
+    re.IGNORECASE,
+)
+_TITLE_RE = re.compile(r"<title>([^<]+)</title>", re.IGNORECASE)
+_FOLLOWERS_RE = re.compile(r"([\d.,]+[MK]?)\s+Followers", re.IGNORECASE)
+_BIO_IN_DESC_RE = re.compile(r'on Instagram:\s*[\"“](.+?)[\"”]', re.IGNORECASE | re.DOTALL)
+
+
+def fetch_profile_meta_fast(page: Page, username: str, timeout_s: int = 12) -> dict[str, Any]:
+    """HTTP-only profile metadata fetch via the authenticated browser context.
+
+    Uses page.request.get() against the profile URL (no full page navigation),
+    parses the <meta name="description"> tag out of the static HTML response,
+    and extracts the follower count, bio, and name. ~300-500ms per call versus
+    ~2 seconds for a full page.goto() — fast enough to enrich every DOM-scraped
+    row in the query loop so the follower-band filter can fire at discovery time
+    instead of polluting the candidate CSV with 1-follower spam and 100k+ mega
+    accounts (the two ends of Instagram's bimodal search ranking).
+
+    Returns empty dict if Instagram serves a login wall or the HTML lacks
+    meta description — caller should fall back to keeping the minimal row
+    and letting the downstream scoring pipeline enrich it.
+    """
+    url = f"https://www.instagram.com/{username}/"
+    try:
+        resp = page.request.get(
+            url,
+            headers={"Referer": "https://www.instagram.com/"},
+            timeout=timeout_s * 1000,
+        )
+    except Exception:
+        return {}
+    if resp.status != 200:
+        return {}
+    try:
+        html = resp.text()
+    except Exception:
+        return {}
+
+    out: dict[str, Any] = {}
+    tm = _TITLE_RE.search(html)
+    if tm:
+        title = tm.group(1)
+        nm = re.match(
+            r"(.+?)\s*\(@" + re.escape(username) + r"\)",
+            title,
+            re.IGNORECASE,
+        )
+        if nm:
+            out["name"] = nm.group(1).strip()
+
+    dm = _META_DESC_RE.search(html)
+    if dm:
+        desc = dm.group(1)
+        fm = _FOLLOWERS_RE.search(desc)
+        if fm:
+            out["followers_raw"] = fm.group(1)
+            out["followers"] = normalize_followers_value(fm.group(1))
+        bm = _BIO_IN_DESC_RE.search(desc)
+        if bm:
+            out["bio"] = bm.group(1).replace("\\n", " ").strip()
+
+    # Private-account indicator is also visible in the static HTML.
+    if '"is_private":true' in html:
+        out["is_private"] = "true"
+    elif '"is_private":false' in html:
+        out["is_private"] = "false"
+    if '"is_verified":true' in html:
+        out["is_verified"] = "true"
+    elif '"is_verified":false' in html:
+        out["is_verified"] = "false"
+
+    return out
+
+
+def enrich_dom_rows(
+    page: Page,
+    rows: dict[str, dict[str, Any]],
+    inter_enrich_sleep: float = 0.15,
+    max_to_enrich: int | None = None,
+) -> None:
+    """Enrich minimal DOM-search rows in place with real profile metadata.
+
+    Mutates each row's name/bio/followers/followers_raw/is_private/is_verified
+    fields from fetch_profile_meta_fast(). Caller can then apply the follower
+    band filter (which needs a real integer follower count to drop out-of-band
+    accounts) and the bio-based include/exclude filter.
+
+    If max_to_enrich is set, stops after that many successful enrichments.
+    """
+    enriched = 0
+    for u, row in rows.items():
+        # Skip rows that already have metadata (topsearch returns enriched rows).
+        if row.get("followers") is not None or str(row.get("bio", "")).strip():
+            continue
+        meta = fetch_profile_meta_fast(page, u)
+        if meta:
+            for k in ("name", "bio", "followers", "followers_raw", "is_private", "is_verified"):
+                if meta.get(k) not in (None, ""):
+                    row[k] = meta[k]
+            # Clear the 'dom_search_minimal' error marker once we actually have data.
+            if row.get("error") == "dom_search_minimal" and row.get("followers") is not None:
+                row["error"] = ""
+            enriched += 1
+        if max_to_enrich is not None and enriched >= max_to_enrich:
+            break
+        time.sleep(inter_enrich_sleep + random.uniform(0.0, 0.1))
+
+
 def collect_usernames_via_ddg(query: str, max_accounts: int) -> list[str]:
     try:
         resp = requests.get(
@@ -245,6 +356,18 @@ def collect_similar_usernames_from_profile_page(page: Page, seed_username: str, 
     return out
 
 
+_SEP_RE = re.compile(r"[._\-/]+")
+
+
+def _normalize_for_match(text: str) -> str:
+    # Replace Instagram username separators (., _, -, /) with spaces and collapse
+    # runs of whitespace so multi-word exclude/include phrases like "bail bonds"
+    # or "photo archive" can match concatenated or underscored usernames like
+    # "california_capitol_bail_bonds" or "ny_daily_news_photo_archive".
+    normalized = _SEP_RE.sub(" ", text.lower())
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
 def relevance_ok(row: dict[str, Any], include_terms: list[str], exclude_terms: list[str]) -> bool:
     # Include check must run against the account's own text (username/name/bio) only.
     # Previously source_keywords was in the haystack too, which contained the query itself
@@ -253,19 +376,32 @@ def relevance_ok(row: dict[str, Any], include_terms: list[str], exclude_terms: l
     name = str(row.get("name", "")).lower()
     bio = str(row.get("bio", "")).lower()
     source_keywords = str(row.get("source_keywords", "")).lower()
-    hay_profile = f"{username} {name} {bio}"
-    hay_all = f"{hay_profile} {source_keywords}"
 
-    # Exclude: scan everything, so bad seed/query contexts (e.g. "cricket") also reject.
-    if exclude_terms and any(t in hay_all for t in exclude_terms):
-        return False
+    # Build both raw and separator-normalized haystacks. Multi-word excludes like
+    # "bail bonds" need the normalized version to match "california_capitol_bail_bonds";
+    # raw matches handle everything else.
+    hay_profile_raw = f"{username} {name} {bio}"
+    hay_profile_norm = f"{_normalize_for_match(username)} {_normalize_for_match(name)} {_normalize_for_match(bio)}"
+    hay_all_raw = f"{hay_profile_raw} {source_keywords}"
+    hay_all_norm = f"{hay_profile_norm} {_normalize_for_match(source_keywords)}"
+
+    # Exclude: scan everything (raw + normalized), so bad seed/query contexts and
+    # separator-broken junk (e.g. "state_news_71_sadora" -> "state news 71 sadora"
+    # which then catches "state news"... but we don't have that as exclude, so safe)
+    # all get rejected. The normalized version is what catches multi-word excludes
+    # against underscored or concatenated usernames.
+    if exclude_terms:
+        for t in exclude_terms:
+            if t in hay_all_raw or t in hay_all_norm:
+                return False
 
     # Include: only enforce when we actually have profile text to match against.
-    # Minimal rows (similar-profile scraping, DDG fallback) have empty bio+name and would
-    # otherwise be wrongly rejected; pass them through for the downstream scoring pipeline.
+    # Minimal rows (similar-profile scraping, DDG fallback, DOM search) have empty
+    # bio+name and would otherwise be wrongly rejected; pass them through for the
+    # downstream scoring pipeline which will fetch real bio data.
     has_profile_text = bool(name.strip() or bio.strip())
     if include_terms and has_profile_text:
-        if not any(t in hay_profile for t in include_terms):
+        if not any(t in hay_profile_raw or t in hay_profile_norm for t in include_terms):
             return False
     return True
 
@@ -303,16 +439,33 @@ def run(config_path: Path, reset_checkpoint: bool = False) -> None:
     state_dir = (ROOT / state_dir_cfg).resolve() if not Path(state_dir_cfg).is_absolute() else Path(state_dir_cfg)
     headless = bool(cfg.get("headless", False))
 
+    # DOM-search enrichment — default ON. Fetches real follower counts + bios
+    # via fast HTTP meta-tag scraping so the follower band filter can actually
+    # drop 1-follower spam and 100k+ mega accounts at discovery time instead of
+    # dumping everything into the candidate CSV.
+    enrich_dom_rows_flag = bool(cfg.get("enrich_dom_rows", True))
+    enrich_sleep = float(cfg.get("enrich_inter_sleep_seconds", 0.15))
+    emp_raw = cfg.get("enrich_max_per_query")
+    enrich_max_per_query = int(emp_raw) if emp_raw is not None else None
+
     # Soft follower band — anything within slack_fraction of the hard band is accepted
     # for later precise scoring. Below min_followers is always dropped (we never want
     # sub-floor accounts). Above max_followers, we accept up to max * (1 + slack) so
     # topsearch rounding noise near the ceiling doesn't silently discard yield.
+    # IMPORTANT: unknown follower counts (None) only pass through when enrichment is
+    # disabled. With enrichment ON (default), every row should have a real int count
+    # by the time it hits follower_band_ok, so None rows are now treated as "couldn't
+    # enrich, probably private/blocked/deleted" and dropped.
     soft_min = min_followers
     soft_max = int(max_followers * (1.0 + band_slack_fraction))
 
     def follower_band_ok(followers: Any) -> bool:
         if not isinstance(followers, int):
-            return True  # unknown count → forward to scoring stage
+            # With enrichment enabled, a None count means the HTTP fetch couldn't
+            # find a follower number (private, blocked, deleted, or login wall).
+            # Drop these to prevent them from polluting the candidate CSV.
+            # With enrichment disabled, pass unknown counts through to scoring.
+            return not enrich_dom_rows_flag
         return soft_min <= followers <= soft_max
 
     seed_accounts = [normalize_username(str(x)) for x in cfg.get("seed_accounts", []) if str(x).strip()]
@@ -381,6 +534,23 @@ def run(config_path: Path, reset_checkpoint: bool = False) -> None:
                         "error": "ddg_fallback_unenriched",
                     }
                 source_label = "ddg" if found_rows else "empty"
+
+            # Enrich any minimal rows (from DOM search or DDG fallback) with real
+            # follower counts + bios via a fast HTTP meta fetch. This is the fix
+            # for the bimodal candidate CSV: without enrichment, DOM-scraped rows
+            # have followers=None and pass the band filter, polluting the CSV
+            # with 1-follower spam and 100k+ mega accounts. With enrichment, the
+            # band filter fires on real counts and only 9k-55k candidates survive.
+            # Also pre-skip rows we already saw — no point spending HTTP quota
+            # on duplicates.
+            if enrich_dom_rows_flag and found_rows:
+                unseen_rows = {u: r for u, r in found_rows.items() if u not in existing}
+                enrich_dom_rows(
+                    page,
+                    unseen_rows,
+                    inter_enrich_sleep=enrich_sleep,
+                    max_to_enrich=enrich_max_per_query,
+                )
             batch: list[dict[str, Any]] = []
             for u, row in found_rows.items():
                 if u in existing:
