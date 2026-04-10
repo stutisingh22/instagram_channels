@@ -18,6 +18,7 @@ from playwright.sync_api import BrowserContext, Page, sync_playwright
 
 from instagram_search_browser_scraper import (
     ROOT,
+    collect_usernames_from_search,
     ensure_not_blocked,
     get_state_dir,
     normalize_followers_value,
@@ -119,7 +120,14 @@ def normalize_query_key(s: str) -> str:
 def collect_profiles_via_topsearch(page: Page, query: str, max_accounts: int) -> dict[str, dict[str, Any]]:
     encoded = query.replace(" ", "%20")
     url = f"https://www.instagram.com/web/search/topsearch/?query={encoded}&count={max_accounts}"
-    resp = page.request.get(url, headers={"X-Requested-With": "XMLHttpRequest"}, timeout=45000)
+    resp = page.request.get(
+        url,
+        headers={
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://www.instagram.com/",
+        },
+        timeout=45000,
+    )
     if resp.status != 200:
         return {}
     try:
@@ -147,6 +155,45 @@ def collect_profiles_via_topsearch(page: Page, query: str, max_accounts: int) ->
         }
         if len(out) >= max_accounts:
             break
+    return out
+
+
+def collect_profiles_via_dom_search(
+    page: Page, query: str, max_accounts: int, sleep_s: float = 1.2
+) -> dict[str, dict[str, Any]]:
+    """Navigate the browser to Instagram's search page and scrape handles from the DOM.
+
+    This is the reliable fallback when /web/search/topsearch/ is deprecated / throttled
+    and returns empty. Instagram's rendered search page still works because it's what
+    the UI uses — the browser actually navigates here so the user sees activity.
+    Returns minimal rows (no bio / follower count / name); the downstream scoring
+    pipeline will enrich each profile with real metadata.
+    """
+    try:
+        usernames = collect_usernames_from_search(
+            page, query, max_accounts=max_accounts, sleep_s=sleep_s
+        )
+    except Exception as exc:
+        print(f"  dom_search error for '{query}': {exc}", flush=True)
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for u in usernames:
+        u_norm = normalize_username(u)
+        if not u_norm or u_norm in RESERVED_HANDLES:
+            continue
+        out[u_norm] = {
+            "profile_url": f"https://www.instagram.com/{u_norm}/",
+            "username": u_norm,
+            "name": "",
+            "followers": None,
+            "followers_raw": "",
+            "bio": "",
+            "is_private": "",
+            "is_verified": "",
+            "source_keywords": f"dom_search:{query}",
+            "error": "dom_search_minimal",
+        }
     return out
 
 
@@ -304,8 +351,22 @@ def run(config_path: Path, reset_checkpoint: bool = False) -> None:
             qkey = normalize_query_key(query)
             if qkey in processed_queries:
                 continue
+
+            # Strategy: try the fast topsearch JSON endpoint first, but fall back to
+            # browser-navigation DOM scraping when it's empty. The /web/search/topsearch/
+            # endpoint has been progressively deprecated by Instagram and now often
+            # returns 200 OK with users=[] — a working DOM-search fallback is what
+            # instagram_search_browser_scraper.py uses and is the only reliable path.
             found_rows = collect_profiles_via_topsearch(page, query, max_accounts=max_accounts_per_query)
+            source_label = "topsearch" if found_rows else ""
             if not found_rows:
+                print(f"  topsearch empty for '{query}', falling back to DOM search...", flush=True)
+                found_rows = collect_profiles_via_dom_search(
+                    page, query, max_accounts=max_accounts_per_query, sleep_s=inter_query_sleep
+                )
+                source_label = "dom_search" if found_rows else ""
+            if not found_rows:
+                print(f"  dom_search also empty for '{query}', trying DDG...", flush=True)
                 for u in collect_usernames_via_ddg(query, max_accounts=max_accounts_per_query):
                     found_rows[u] = {
                         "profile_url": f"https://www.instagram.com/{u}/",
@@ -319,6 +380,7 @@ def run(config_path: Path, reset_checkpoint: bool = False) -> None:
                         "source_keywords": f"ddg:{query}",
                         "error": "ddg_fallback_unenriched",
                     }
+                source_label = "ddg" if found_rows else "empty"
             batch: list[dict[str, Any]] = []
             for u, row in found_rows.items():
                 if u in existing:
@@ -334,7 +396,11 @@ def run(config_path: Path, reset_checkpoint: bool = False) -> None:
             append_rows(candidate_csv, batch)
             processed_queries.add(qkey)
             save_checkpoint(checkpoint_path, processed_seeds, processed_queries, appended)
-            print(f"[query {i}/{len(discovery_queries)}] {query} added={len(batch)} total={len(appended)}", flush=True)
+            print(
+                f"[query {i}/{len(discovery_queries)}] {query} "
+                f"via={source_label or 'empty'} found={len(found_rows)} added={len(batch)} total={len(appended)}",
+                flush=True,
+            )
             time.sleep(inter_query_sleep + random.uniform(0.1, 0.5))
 
         if skip_seed_phase:
