@@ -7,6 +7,7 @@
   "max_accounts_per_query": 30,
   "min_followers": 9000,
   "max_followers": 55000,
+  "skip_seed_phase": true,
   "inter_query_sleep_seconds": 0.7,
   "inter_seed_sleep_seconds": 1.0,
   "seed_accounts": [
