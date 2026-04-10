@@ -145,6 +145,7 @@ This path is designed for long runs where you want live CSV monitoring and kill-
 ```bash
 python3 news_discovery_engine.py --config hollywood_popculture_discovery_config.json
 python3 news_discovery_engine.py --config us_politics_discovery_config.json
+python3 news_discovery_engine.py --config us_local_politics_discovery_config.json
 ```
 
 2. Run profile scoring/enrichment for each vertical:
@@ -152,14 +153,35 @@ python3 news_discovery_engine.py --config us_politics_discovery_config.json
 ```bash
 python3 us_entertainment_news_pipeline.py --config hollywood_popculture_news_config.json
 python3 us_entertainment_news_pipeline.py --config us_politics_news_config.json
+python3 us_entertainment_news_pipeline.py --config us_local_politics_news_config.json
 ```
 
 Monitoring files while running:
 
 - Hollywood candidates: `data/out/us_hollywood_popculture_news_candidates_append.csv`
-- Politics candidates: `data/out/us_politics_news_candidates_append.csv`
+- National politics candidates: `data/out/us_politics_news_candidates_append.csv`
+- Local (state + city) politics candidates: `data/out/us_local_politics_news_candidates_append.csv`
 - Hollywood high-quality live: `data/out/us_hollywood_popculture_news_high_quality_live.csv`
-- Politics high-quality live: `data/out/us_politics_news_high_quality_live.csv`
+- National politics high-quality live: `data/out/us_politics_news_high_quality_live.csv`
+- Local politics high-quality live: `data/out/us_local_politics_news_high_quality_live.csv`
+
+### Local (state + city) politics vertical
+
+The `us_local_politics_*` configs target state capitol reporters, city hall
+beat reporters, and state-focused outlets (Texas Tribune, CalMatters,
+Spotlight PA, The Nevada Independent, etc.) — the accounts that the national
+DC-focused configs never surface. Follower band is `9,000 – 55,000` to match
+the acquisition target. Run the three stages the same way as the other
+verticals:
+
+```bash
+python3 news_discovery_engine.py --config us_local_politics_discovery_config.json
+.venv/bin/python following_graph_news_expander.py --config following_graph_local_politics_config.json
+python3 us_entertainment_news_pipeline.py --config us_local_politics_news_config.json
+```
+
+Reset-from-scratch variants take the same `--reset-checkpoint` flag as the
+other verticals.
 
 Reset from scratch for a vertical:
 
@@ -175,14 +197,17 @@ Opens each seed’s **Following** modal, scrolls, and BFS-expands up to `max_gra
 ```bash
 .venv/bin/python following_graph_news_expander.py --config following_graph_popculture_config.json
 .venv/bin/python following_graph_news_expander.py --config following_graph_politics_config.json
+.venv/bin/python following_graph_news_expander.py --config following_graph_local_politics_config.json
 ```
 
 Outputs (append-only):
 
 - Pop culture candidates: `data/out/us_popculture_graph_candidates_append.csv`
 - Pop culture edges: `data/out/us_popculture_graph_edges_append.csv`
-- Politics candidates: `data/out/us_politics_graph_candidates_append.csv`
-- Politics edges: `data/out/us_politics_graph_edges_append.csv`
+- National politics candidates: `data/out/us_politics_graph_candidates_append.csv`
+- National politics edges: `data/out/us_politics_graph_edges_append.csv`
+- Local politics candidates: `data/out/us_local_politics_graph_candidates_append.csv`
+- Local politics edges: `data/out/us_local_politics_graph_edges_append.csv`
 
 Point your scorer `input_search_csv` at the matching `*_graph_candidates_append.csv`, or merge that CSV with other candidate files before scoring.
 
