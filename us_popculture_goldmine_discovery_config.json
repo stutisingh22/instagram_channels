@@ -5,8 +5,8 @@
   "playwright_state_dir": ".ig_browser_state",
   "headless": false,
   "max_accounts_per_query": 35,
-  "min_followers": 8000,
-  "max_followers": 90000,
+  "min_followers": 9000,
+  "max_followers": 55000,
   "inter_query_sleep_seconds": 0.6,
   "inter_seed_sleep_seconds": 0.9,
   "seed_accounts": [
