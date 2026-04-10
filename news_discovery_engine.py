@@ -245,6 +245,18 @@ def collect_similar_usernames_from_profile_page(page: Page, seed_username: str, 
     return out
 
 
+_SEP_RE = re.compile(r"[._\-/]+")
+
+
+def _normalize_for_match(text: str) -> str:
+    # Replace Instagram username separators (., _, -, /) with spaces and collapse
+    # runs of whitespace so multi-word exclude/include phrases like "bail bonds"
+    # or "photo archive" can match concatenated or underscored usernames like
+    # "california_capitol_bail_bonds" or "ny_daily_news_photo_archive".
+    normalized = _SEP_RE.sub(" ", text.lower())
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
 def relevance_ok(row: dict[str, Any], include_terms: list[str], exclude_terms: list[str]) -> bool:
     # Include check must run against the account's own text (username/name/bio) only.
     # Previously source_keywords was in the haystack too, which contained the query itself
@@ -253,19 +265,32 @@ def relevance_ok(row: dict[str, Any], include_terms: list[str], exclude_terms: l
     name = str(row.get("name", "")).lower()
     bio = str(row.get("bio", "")).lower()
     source_keywords = str(row.get("source_keywords", "")).lower()
-    hay_profile = f"{username} {name} {bio}"
-    hay_all = f"{hay_profile} {source_keywords}"
 
-    # Exclude: scan everything, so bad seed/query contexts (e.g. "cricket") also reject.
-    if exclude_terms and any(t in hay_all for t in exclude_terms):
-        return False
+    # Build both raw and separator-normalized haystacks. Multi-word excludes like
+    # "bail bonds" need the normalized version to match "california_capitol_bail_bonds";
+    # raw matches handle everything else.
+    hay_profile_raw = f"{username} {name} {bio}"
+    hay_profile_norm = f"{_normalize_for_match(username)} {_normalize_for_match(name)} {_normalize_for_match(bio)}"
+    hay_all_raw = f"{hay_profile_raw} {source_keywords}"
+    hay_all_norm = f"{hay_profile_norm} {_normalize_for_match(source_keywords)}"
+
+    # Exclude: scan everything (raw + normalized), so bad seed/query contexts and
+    # separator-broken junk (e.g. "state_news_71_sadora" -> "state news 71 sadora"
+    # which then catches "state news"... but we don't have that as exclude, so safe)
+    # all get rejected. The normalized version is what catches multi-word excludes
+    # against underscored or concatenated usernames.
+    if exclude_terms:
+        for t in exclude_terms:
+            if t in hay_all_raw or t in hay_all_norm:
+                return False
 
     # Include: only enforce when we actually have profile text to match against.
-    # Minimal rows (similar-profile scraping, DDG fallback) have empty bio+name and would
-    # otherwise be wrongly rejected; pass them through for the downstream scoring pipeline.
+    # Minimal rows (similar-profile scraping, DDG fallback, DOM search) have empty
+    # bio+name and would otherwise be wrongly rejected; pass them through for the
+    # downstream scoring pipeline which will fetch real bio data.
     has_profile_text = bool(name.strip() or bio.strip())
     if include_terms and has_profile_text:
-        if not any(t in hay_profile for t in include_terms):
+        if not any(t in hay_profile_raw or t in hay_profile_norm for t in include_terms):
             return False
     return True
 
