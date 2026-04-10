@@ -121,3 +121,103 @@ Outputs:
 
 - `data/out/instagram_search_accounts.csv`
 - `data/raw/instagram_search_keyword_logs.json`
+
+## Reels "For You" scraper (separate file)
+
+New script for flow: keyword -> search page -> open reel seeds -> move through reel feed and capture IDs + usernames.
+
+```bash
+cp reels_for_you_config.example.json reels_for_you_config.json
+python3 instagram_reels_for_you_scraper.py
+```
+
+Outputs:
+
+- `data/out/instagram_reels_for_you_<timestamp>.csv`
+- `data/raw/instagram_reels_for_you_<timestamp>.json`
+
+## Vertical discovery + scoring (append/resume safe)
+
+This path is designed for long runs where you want live CSV monitoring and kill-safe resume.
+
+1. Run discovery (append-only candidates + checkpoint):
+
+```bash
+python3 news_discovery_engine.py --config hollywood_popculture_discovery_config.json
+python3 news_discovery_engine.py --config us_politics_discovery_config.json
+```
+
+2. Run profile scoring/enrichment for each vertical:
+
+```bash
+python3 us_entertainment_news_pipeline.py --config hollywood_popculture_news_config.json
+python3 us_entertainment_news_pipeline.py --config us_politics_news_config.json
+```
+
+Monitoring files while running:
+
+- Hollywood candidates: `data/out/us_hollywood_popculture_news_candidates_append.csv`
+- Politics candidates: `data/out/us_politics_news_candidates_append.csv`
+- Hollywood high-quality live: `data/out/us_hollywood_popculture_news_high_quality_live.csv`
+- Politics high-quality live: `data/out/us_politics_news_high_quality_live.csv`
+
+Reset from scratch for a vertical:
+
+```bash
+python3 news_discovery_engine.py --config hollywood_popculture_discovery_config.json --reset-checkpoint
+python3 us_entertainment_news_pipeline.py --config hollywood_popculture_news_config.json --reset-checkpoint
+```
+
+## Following-graph bulk expander (recommended for volume)
+
+Opens each seed’s **Following** modal, scrolls, and BFS-expands up to `max_graph_depth`. Every new handle is **appended immediately** to CSV (`flush` + `fsync` per row). Checkpoint updates **after each expanded account** so you can stop anytime.
+
+```bash
+.venv/bin/python following_graph_news_expander.py --config following_graph_popculture_config.json
+.venv/bin/python following_graph_news_expander.py --config following_graph_politics_config.json
+```
+
+Outputs (append-only):
+
+- Pop culture candidates: `data/out/us_popculture_graph_candidates_append.csv`
+- Pop culture edges: `data/out/us_popculture_graph_edges_append.csv`
+- Politics candidates: `data/out/us_politics_graph_candidates_append.csv`
+- Politics edges: `data/out/us_politics_graph_edges_append.csv`
+
+Point your scorer `input_search_csv` at the matching `*_graph_candidates_append.csv`, or merge that CSV with other candidate files before scoring.
+
+Optional: set `"enrich_via_topsearch": true` in the graph config for richer rows (slower).
+
+```bash
+.venv/bin/python following_graph_news_expander.py --config following_graph_popculture_config.json --reset-checkpoint
+```
+
+## Instagram DM Outreach (append-only + resume safe)
+
+Sends your message to a shortlist of Instagram handles, while writing progress continuously to CSV so you can kill/restart the terminal without losing already-sent/attempted rows.
+
+### Input CSV
+- A CSV file with a column containing the Instagram handle (for example header `handles`).
+
+### Run
+```bash
+.venv/bin/python instagram_dm_outreach.py \
+  --input-csv "/absolute/path/to/a-shortlisted.csv" \
+  --handle-col "handles" \
+  --message "Hey - I lead corporate development for LH2 Holdings, a US-based digital media company. We own and operate 20+ media brands and are actively looking to acquire pages in this space.\nWould you be open to a quick chat? We'd love to explore buying this page - we know how to grow these and have done it across a number of brands already.\nNo pressure, just want to see if there's interest.\n— Stuti" \
+  --max-dms-per-run 100 \
+  --batch-size 50 \
+  --batch-sleep-seconds 60
+```
+
+### Monitor live progress
+- Log CSV (append-only): `data/out/instagram_dm_outreach_log_append.csv`
+- Checkpoint JSON (resume state): `data/raw/instagram_dm_outreach_checkpoint.json`
+
+### Dry run (no clicking “Send”)
+```bash
+.venv/bin/python instagram_dm_outreach.py \
+  --input-csv "/absolute/path/to/a-shortlisted.csv" \
+  --handle-col "handles" \
+  --dry-run
+```

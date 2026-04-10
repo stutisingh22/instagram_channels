@@ -1,0 +1,11 @@
+{
+  "keywords": [
+    "usnews",
+    "uspolitics",
+    "americannews"
+  ],
+  "max_seed_reels_per_keyword": 5,
+  "reels_to_collect_per_seed": 25,
+  "playwright_state_dir": ".ig_browser_state_reels",
+  "headless": false
+}

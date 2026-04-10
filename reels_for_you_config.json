@@ -1,0 +1,22 @@
+{
+  "keywords": [
+    "usnews",
+    "uspolitics",
+    "americannews"
+  ],
+  "keywords_excel_path": "LH2_Instagram_Hashtags.xlsx",
+  "keywords_excel_sheet": "all",
+  "keywords_excel_limit": 450,
+  "max_seed_reels_per_keyword": 20,
+  "max_seed_scroll_rounds": 12,
+  "reels_to_collect_per_seed": 35,
+  "us_qualify_broad_keywords": true,
+  "enforce_unique_profile_per_keyword": true,
+  "max_unique_profiles_per_keyword": 30,
+  "drop_likely_invalid_usernames": true,
+  "use_explore_fallback": true,
+  "inter_keyword_delay_seconds": 0.3,
+  "startup_login_pause_seconds": 0,
+  "playwright_state_dir": ".ig_browser_state",
+  "headless": false
+}

@@ -1,0 +1,10 @@
+{
+  "seed_input_csv": "instagram handles - Sheet2.csv",
+  "target_append_csv": "data/out/instagram_search_accounts_run_20260324_135032.csv",
+  "max_seeds": 200,
+  "max_accounts_per_query": 20,
+  "min_followers": 9000,
+  "max_followers": 80000,
+  "inter_query_sleep_seconds": 0.6,
+  "inter_seed_sleep_seconds": 1.0
+}

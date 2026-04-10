@@ -1,0 +1,31 @@
+{
+  "vertical": "us_popculture_graph",
+  "output_prefix": "us_popculture_graph",
+  "candidate_output_csv": "data/out/us_popculture_graph_candidates_append.csv",
+  "edges_output_csv": "data/out/us_popculture_graph_edges_append.csv",
+  "checkpoint_relative_path": "data/raw/us_popculture_graph_checkpoint.json",
+  "playwright_state_dir": ".ig_browser_state",
+  "headless": false,
+  "max_following_per_source": 400,
+  "max_graph_depth": 2,
+  "max_expand_nodes": 400,
+  "inter_source_sleep_seconds": 1.2,
+  "enrich_via_topsearch": false,
+  "seed_accounts": [
+    "tmz",
+    "pagesix",
+    "eonline",
+    "entertainmenttonight",
+    "justjared",
+    "deadline",
+    "variety",
+    "hollywoodreporter",
+    "popcrave",
+    "buzzfeedceleb",
+    "billboard",
+    "complex",
+    "hollywoodunlocked",
+    "usweekly",
+    "people"
+  ]
+}

@@ -1,0 +1,9 @@
+.env
+.ig_browser_state*
+dm_outreach_debug*
+dm_outreach_logs*
+data/raw/*
+data/out/*
+.venv/
+__pycache__/
+.DS_Store

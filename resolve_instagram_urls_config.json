@@ -1,0 +1,8 @@
+{
+  "input_file": "data/in/profiles_to_resolve.csv",
+  "name_column": "name",
+  "handle_column": "username",
+  "output_file": "data/out/resolved_instagram_urls.csv",
+  "ddg_timeout_seconds": 25,
+  "sleep_seconds": 0.8
+}

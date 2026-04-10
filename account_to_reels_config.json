@@ -1,0 +1,8 @@
+{
+  "source_accounts_csv": "data/out/instagram_search_accounts.csv",
+  "max_accounts": 300,
+  "max_reels_per_account": 30,
+  "playwright_state_dir": ".ig_browser_state_account_reels",
+  "sleep_seconds": 1.0,
+  "headless": false
+}
