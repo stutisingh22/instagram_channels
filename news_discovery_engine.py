@@ -199,18 +199,27 @@ def collect_similar_usernames_from_profile_page(page: Page, seed_username: str, 
 
 
 def relevance_ok(row: dict[str, Any], include_terms: list[str], exclude_terms: list[str]) -> bool:
-    hay = " ".join(
-        [
-            str(row.get("username", "")).lower(),
-            str(row.get("name", "")).lower(),
-            str(row.get("bio", "")).lower(),
-            str(row.get("source_keywords", "")).lower(),
-        ]
-    )
-    if include_terms and not any(t in hay for t in include_terms):
+    # Include check must run against the account's own text (username/name/bio) only.
+    # Previously source_keywords was in the haystack too, which contained the query itself
+    # (e.g. "query:us politics news") and silently bypassed every include filter.
+    username = str(row.get("username", "")).lower()
+    name = str(row.get("name", "")).lower()
+    bio = str(row.get("bio", "")).lower()
+    source_keywords = str(row.get("source_keywords", "")).lower()
+    hay_profile = f"{username} {name} {bio}"
+    hay_all = f"{hay_profile} {source_keywords}"
+
+    # Exclude: scan everything, so bad seed/query contexts (e.g. "cricket") also reject.
+    if exclude_terms and any(t in hay_all for t in exclude_terms):
         return False
-    if exclude_terms and any(t in hay for t in exclude_terms):
-        return False
+
+    # Include: only enforce when we actually have profile text to match against.
+    # Minimal rows (similar-profile scraping, DDG fallback) have empty bio+name and would
+    # otherwise be wrongly rejected; pass them through for the downstream scoring pipeline.
+    has_profile_text = bool(name.strip() or bio.strip())
+    if include_terms and has_profile_text:
+        if not any(t in hay_profile for t in include_terms):
+            return False
     return True
 
 
