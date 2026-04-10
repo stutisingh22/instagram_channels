@@ -238,6 +238,16 @@ def run(config_path: Path, reset_checkpoint: bool = False) -> None:
     max_accounts_per_query = int(cfg.get("max_accounts_per_query", 25))
     min_followers = int(cfg.get("min_followers", 10000))
     max_followers = int(cfg.get("max_followers", 70000))
+    # Soft-band tolerance: topsearch's reported follower_count is often stale or rounded.
+    # Rows outside the hard band by more than this fraction are still dropped; rows within
+    # it get forwarded to the scoring pipeline which has its own precise band check.
+    band_slack_fraction = float(cfg.get("band_slack_fraction", 0.5))
+    # Skip the seed-loop entirely for configs where every seed is a mega-publisher
+    # (politico, tmz, etc.) — topsearching those usernames only returns more mega accounts,
+    # and the similar-profile HTML scrape returns reserved handles. Those configs should
+    # rely on the query phase here, plus following_graph_news_expander.py for seed-based
+    # graph expansion, instead of wasting cycles on zero-yield seeds.
+    skip_seed_phase = bool(cfg.get("skip_seed_phase", False))
     include_terms = [str(x).strip().lower() for x in cfg.get("include_terms", []) if str(x).strip()]
     exclude_terms = [str(x).strip().lower() for x in cfg.get("exclude_terms", []) if str(x).strip()]
     inter_query_sleep = float(cfg.get("inter_query_sleep_seconds", 0.7))
@@ -245,6 +255,18 @@ def run(config_path: Path, reset_checkpoint: bool = False) -> None:
     state_dir_cfg = str(cfg.get("playwright_state_dir", ".ig_browser_state")).strip()
     state_dir = (ROOT / state_dir_cfg).resolve() if not Path(state_dir_cfg).is_absolute() else Path(state_dir_cfg)
     headless = bool(cfg.get("headless", False))
+
+    # Soft follower band — anything within slack_fraction of the hard band is accepted
+    # for later precise scoring. Below min_followers is always dropped (we never want
+    # sub-floor accounts). Above max_followers, we accept up to max * (1 + slack) so
+    # topsearch rounding noise near the ceiling doesn't silently discard yield.
+    soft_min = min_followers
+    soft_max = int(max_followers * (1.0 + band_slack_fraction))
+
+    def follower_band_ok(followers: Any) -> bool:
+        if not isinstance(followers, int):
+            return True  # unknown count → forward to scoring stage
+        return soft_min <= followers <= soft_max
 
     seed_accounts = [normalize_username(str(x)) for x in cfg.get("seed_accounts", []) if str(x).strip()]
     discovery_queries = [str(x).strip() for x in cfg.get("discovery_queries", []) if str(x).strip()]
@@ -258,7 +280,10 @@ def run(config_path: Path, reset_checkpoint: bool = False) -> None:
     existing = read_existing_usernames(candidate_csv) | appended
 
     print(
-        f"Discovery start ({out_prefix}): seeds={len(seed_accounts)}, queries={len(discovery_queries)}, existing={len(existing)}",
+        f"Discovery start ({out_prefix}): seeds={len(seed_accounts)}"
+        f"{' (SKIPPED)' if skip_seed_phase else ''}, "
+        f"queries={len(discovery_queries)}, existing={len(existing)}, "
+        f"band={soft_min}..{soft_max} (hard {min_followers}..{max_followers})",
         flush=True,
     )
 
@@ -272,46 +297,9 @@ def run(config_path: Path, reset_checkpoint: bool = False) -> None:
         page = context.new_page()
         wait_for_manual_login(page)
 
-        for i, seed in enumerate(seed_accounts, start=1):
-            if seed in processed_seeds:
-                continue
-            discovered = collect_similar_usernames_from_profile_page(page, seed, max_accounts=max_accounts_per_query)
-            found_rows = collect_profiles_via_topsearch(page, seed, max_accounts=max_accounts_per_query)
-            for u in discovered:
-                found_rows.setdefault(
-                    u,
-                    {
-                        "profile_url": f"https://www.instagram.com/{u}/",
-                        "username": u,
-                        "name": "",
-                        "followers": None,
-                        "followers_raw": "",
-                        "bio": "",
-                        "is_private": "",
-                        "is_verified": "",
-                        "source_keywords": f"similar_to:{seed}",
-                        "error": "similar_profile_minimal",
-                    },
-                )
-            batch: list[dict[str, Any]] = []
-            for u, row in found_rows.items():
-                if u in existing:
-                    continue
-                followers = row.get("followers")
-                if isinstance(followers, int) and (followers < min_followers or followers > max_followers):
-                    continue
-                row["source_keywords"] = f"seed:{seed}|{row.get('source_keywords','')}"
-                if not relevance_ok(row, include_terms, exclude_terms):
-                    continue
-                existing.add(u)
-                appended.add(u)
-                batch.append(row)
-            append_rows(candidate_csv, batch)
-            processed_seeds.add(seed)
-            save_checkpoint(checkpoint_path, processed_seeds, processed_queries, appended)
-            print(f"[seed {i}/{len(seed_accounts)}] @{seed} added={len(batch)} total={len(appended)}", flush=True)
-            time.sleep(inter_seed_sleep + random.uniform(0.1, 0.5))
-
+        # Query phase runs FIRST — this is where the 9k-55k yield actually comes from.
+        # Putting it ahead of the seed phase means the user sees results immediately
+        # instead of waiting through a dead seed phase on mega-publisher configs.
         for i, query in enumerate(discovery_queries, start=1):
             qkey = normalize_query_key(query)
             if qkey in processed_queries:
@@ -335,8 +323,7 @@ def run(config_path: Path, reset_checkpoint: bool = False) -> None:
             for u, row in found_rows.items():
                 if u in existing:
                     continue
-                followers = row.get("followers")
-                if isinstance(followers, int) and (followers < min_followers or followers > max_followers):
+                if not follower_band_ok(row.get("followers")):
                     continue
                 row["source_keywords"] = f"query:{query}|{row.get('source_keywords','')}"
                 if not relevance_ok(row, include_terms, exclude_terms):
@@ -349,6 +336,52 @@ def run(config_path: Path, reset_checkpoint: bool = False) -> None:
             save_checkpoint(checkpoint_path, processed_seeds, processed_queries, appended)
             print(f"[query {i}/{len(discovery_queries)}] {query} added={len(batch)} total={len(appended)}", flush=True)
             time.sleep(inter_query_sleep + random.uniform(0.1, 0.5))
+
+        if skip_seed_phase:
+            print(
+                "Seed phase skipped (skip_seed_phase=true). "
+                "Use following_graph_news_expander.py for seed-based expansion.",
+                flush=True,
+            )
+        else:
+            for i, seed in enumerate(seed_accounts, start=1):
+                if seed in processed_seeds:
+                    continue
+                discovered = collect_similar_usernames_from_profile_page(page, seed, max_accounts=max_accounts_per_query)
+                found_rows = collect_profiles_via_topsearch(page, seed, max_accounts=max_accounts_per_query)
+                for u in discovered:
+                    found_rows.setdefault(
+                        u,
+                        {
+                            "profile_url": f"https://www.instagram.com/{u}/",
+                            "username": u,
+                            "name": "",
+                            "followers": None,
+                            "followers_raw": "",
+                            "bio": "",
+                            "is_private": "",
+                            "is_verified": "",
+                            "source_keywords": f"similar_to:{seed}",
+                            "error": "similar_profile_minimal",
+                        },
+                    )
+                batch: list[dict[str, Any]] = []
+                for u, row in found_rows.items():
+                    if u in existing:
+                        continue
+                    if not follower_band_ok(row.get("followers")):
+                        continue
+                    row["source_keywords"] = f"seed:{seed}|{row.get('source_keywords','')}"
+                    if not relevance_ok(row, include_terms, exclude_terms):
+                        continue
+                    existing.add(u)
+                    appended.add(u)
+                    batch.append(row)
+                append_rows(candidate_csv, batch)
+                processed_seeds.add(seed)
+                save_checkpoint(checkpoint_path, processed_seeds, processed_queries, appended)
+                print(f"[seed {i}/{len(seed_accounts)}] @{seed} added={len(batch)} total={len(appended)}", flush=True)
+                time.sleep(inter_seed_sleep + random.uniform(0.1, 0.5))
 
         context.close()
 
