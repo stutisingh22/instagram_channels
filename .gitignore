@@ -7,3 +7,8 @@ data/out/*
 .venv/
 __pycache__/
 .DS_Store
+credentials.json
+token.json
+*.pem
+token*.pickle
+tokens/
